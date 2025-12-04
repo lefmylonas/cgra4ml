@@ -1,11 +1,9 @@
-#ifndef RISCV
-  #include <assert.h>
-  #include <stdlib.h>
-  #include <stdio.h>
-  #include <math.h>
-#endif
+#include <assert.h>
+#include <stdlib.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <math.h>
 
 typedef int8_t   i8 ;
 typedef int16_t  i16;
@@ -15,14 +13,8 @@ typedef uint8_t  u8 ;
 typedef uint16_t u16;
 typedef uint32_t u32;
 typedef uint64_t u64;
-
-typedef struct { int quot; int rem; } idiv_t;
-static inline idiv_t idiv(int numer, int denom) {
-  idiv_t r; 
-  r.quot = numer / denom; 
-  r.rem = numer % denom; 
-  return r;
-}
+typedef float    f32;
+typedef double   f64;
 
 typedef const struct {
   const u16  n, l, kw, coe, h, w, ci, co, w_kw2, t, p, cm, cm_p0, on, oh, ow, oc, ch, ph, cw, pw, pkh, psh, pkw, psw;
@@ -31,7 +23,7 @@ typedef const struct {
   const i8   is_bias, is_pool, is_flatten, is_softmax;
   const i8   x_pad, b_val_shift, b_bias_shift, ca_nzero, ca_shift, ca_pl_scale, aa_nzero, aa_shift, aa_pl_scale, pa_nzero, pa_shift, pa_pl_scale, softmax_frac;
   const i8   csh, csh_shift, psh_shift, csw, csw_shift, psw_shift, pool;
-  const i32  softmax_max_i;
+  const f32  softmax_max_f;
   const u64  header;
   const i32  debug_nhwc_words;
 } Bundle_t;
@@ -49,17 +41,15 @@ typedef enum {POOL_NONE, POOL_MAX, POOL_AVG} Pool_t;
 #endif
 
 typedef struct {
+  // These are written often, keep them on OCM
+  Y_TYPE ocm            [2][PE_COLS*PE_ROWS];
+  i32    nhwc           [NHWC_WORDS  ];
+  i8     out_buffers    [N_OUT_BUF   ][O_BYTES_MAX ];
   // These can be kept in DDR
   i8     w              [W_BYTES     ];
   B_TYPE b              [B_WORDS     ]; // keep next to w. weights are loaded to w_ptr
   i8     x              [X_BYTES     ]; // keep next to wb. wbx is loaded to w_ptr
   O_TYPE y              [O_WORDS     ];
-  
-  // These are written often, keep them on OCM
-  Y_TYPE ocm            [2][PE_COLS*PE_ROWS];
-  i32    nhwc           [NHWC_WORDS  ];
-  i8     out_buffers    [N_OUT_BUF   ][O_BYTES_MAX ];
-  
 #ifdef XDEBUG
   i8     debug_tiled    [O_WORDS_MAX ];
   i32    debug_nhwc     [NHWC_WORDS  ];
@@ -86,6 +76,7 @@ typedef struct {
 #endif
 
 #ifdef SIM
+  #include <stdio.h>
   #define sim_fprintf fprintf
   #include <stdbool.h>
 
@@ -96,12 +87,7 @@ typedef struct {
 
 #else
   #define sim_fprintf(...)
-
-  // #ifdef RISCV
-  //   Memory_st mem_phy;
-  // #else
-    #define mem_phy (*(Memory_st* restrict)MEM_BASEADDR)
-  // #endif
+  #define mem_phy (*(Memory_st* restrict)MEM_BASEADDR)
 
   inline volatile u32 get_config(void *config_base, u32 offset){
     return *(volatile u32 *)(config_base + offset*4);
@@ -117,7 +103,7 @@ typedef struct {
   #define assert_printf(v1, op, v2, optional_debug_info,...) ((v1  op v2) || (debug_printf("ASSERT FAILED: \n CONDITION: "), debug_printf("( " #v1 " " #op " " #v2 " )"), debug_printf(", VALUES: ( %d %s %d ), ", v1, #op, v2), debug_printf("DEBUG_INFO: " optional_debug_info), debug_printf(" " __VA_ARGS__), debug_printf("\n\n"), assert(v1 op v2), 0))
 #else
   #define assert_printf(...)
-  // #define debug_printf(...)
+  #define debug_printf(...)
 #endif
 
 
@@ -165,7 +151,7 @@ static inline void write_x(i8 val, i8 *restrict p_out_buffer, Memory_st *restric
 #endif
 
   // Pack bits and store
-  idiv_t packed_idx = idiv(flat_index, X_WORDS_PER_BYTE);
+  div_t packed_idx = div(flat_index, X_WORDS_PER_BYTE);
   assert_printf (packed_idx.quot , <, bundles[ib].o_bytes, "write_x", WRITEX_DEBUG_INFO);
 
   u8 packed_val      = ((u8)val & X_BITS_MASK) << (packed_idx.rem * X_BITS);
@@ -218,11 +204,11 @@ static inline void tile_write( i32 out_val, i8 *restrict p_out_buffer, i32 ib, B
 
   i8 yp_first  = i_yc < pb_out->cm_p0;
 
-  idiv_t div_oh  = idiv(i_yh, PE_ROWS);
+  div_t div_oh  = div(i_yh, PE_ROWS);
   i32   i_yr    = div_oh.rem;
   i32   i_yl    = div_oh.quot;
 
-  idiv_t div_oc    = idiv(i_yc-pb_out->cm_p0, pb_out->cm);
+  div_t div_oc    = div(i_yc-pb_out->cm_p0, pb_out->cm);
   i32   i_yp      = yp_first ? 0             : div_oc.quot + 1;
   i32   i_ycm     = yp_first ? i_yc          : div_oc.rem;
   i32   ycm       = yp_first ? pb_out->cm_p0 : pb_out->cm  ;
@@ -253,7 +239,7 @@ extern EXT_C u8 model_run(Memory_st *restrict mp, void *p_config) {
   static i8 *restrict p_out_buffer = 0;
 
   i32   iy_nhwc;
-  idiv_t div_ch, div_cw, div_ixh, div_ixw;
+  div_t div_ch, div_cw, div_ixh, div_ixw;
   i32   ph_end, ph_beg_const, ixh_beg, xh_sweep;
   i32   pw_end, pw_beg_const, ixw_beg, xw_sweep;
 
@@ -369,8 +355,8 @@ DMA_WAIT:
                     sim_fprintf(fp_sum,"%d\n", out_val); // Save summed output
 
                     // ------ CONV STRIDING ------
-                    div_ch = idiv(i_yh-pb->csh_shift, pb->csh);
-                    div_cw = idiv(i_yw-pb->csw_shift, pb->csw);
+                    div_ch = div(i_yh-pb->csh_shift, pb->csh);
+                    div_cw = div(i_yw-pb->csw_shift, pb->csw);
 
                     if (div_ch.rem != 0 || div_cw.rem != 0)
                       goto PROCESS_AND_STORE_DONE;
@@ -403,7 +389,7 @@ DMA_WAIT:
 
                       f32 val = (f32)out_val;
                       val = val / (f32)(1 << pb->softmax_frac);
-                      val = val - ((f32)pb->softmax_max_i)/(1 << 17);
+                      val = val - pb->softmax_max_f;
                       val = (f32)exp(val);
                       mp->y[iy_nhwc] = val;
 
@@ -432,8 +418,8 @@ DMA_WAIT:
                     iy_nhwc = flatten_nhwc(i_yn,i_yh,i_yw,i_yc, yn,yh,yw,yc, "Before maxpool", DEBUG_INFO);// store as nhwc for pooling
                     mp->nhwc[iy_nhwc] = out_val;
 
-                    div_ixh = idiv(i_yh+pb->psh_shift-pb->pkh+1, pb->psh);
-                    div_ixw = idiv(i_yw+pb->psw_shift-pb->pkw+1, pb->psw);
+                    div_ixh = div(i_yh+pb->psh_shift-pb->pkh+1, pb->psh);
+                    div_ixw = div(i_yw+pb->psw_shift-pb->pkw+1, pb->psw);
                     ixh_beg = div_ixh.quot; // ix(hw) that corresponds to the pooling window
                     ixw_beg = div_ixw.quot;
 
@@ -524,7 +510,9 @@ PROCESS_AND_STORE_DONE:
     sprintf(f_path_tiled, "%s/%0d_y_tiled_sim.txt", DATA_DIR, ib);
     FILE *fp_tiled = fopen(f_path_tiled, "w");
     for (i32 i=0; i<pb->o_words; i++)
-      if (ib == N_BUNDLES-1) sim_fprintf(fp_tiled,"%d\n", (i32)(mp->y[i] * (1 << 17)));
+      if (ib == N_BUNDLES-1)
+        if (pb->is_softmax) sim_fprintf(fp_tiled,"%f\n", (f32  )mp->y[i]);
+        else                sim_fprintf(fp_tiled,"%d\n", (i32)mp->y[i]);
       else sim_fprintf(fp_tiled,"%d\n", mp->debug_tiled[i]);
     fclose(fp_tiled);
 
@@ -624,9 +612,8 @@ extern EXT_C void model_setup(Memory_st *restrict mp, void *p_config) {
     assert_printf(bundles[var].p, <, 1<<16, "", "P should be less than 2**16 for bundle:%x", var);
     assert_printf(bundles[var].t, <, 1<<16, "", "T should be less than 2**16 for bundle:%x", var);
     parameters[8*var+5] = (bundles[var].t << 16) + bundles[var].p; // max p
-    uint64_t h = bundles[var].header;
-    parameters[8*var + 6] = (uint32_t)(h & 0xFFFFFFFFu);
-    parameters[8*var + 7] = (uint32_t)(h >> 32);
+    parameters[8*var+6] = ((u32*)&bundles[var].header)[0];
+    parameters[8*var+7] = ((u32*)&bundles[var].header)[1];
   }
   for (int var = 0; var < 8*N_BUNDLES; var++){
     set_config(p_config, 16+var, parameters[var]);
@@ -636,7 +623,6 @@ extern EXT_C void model_setup(Memory_st *restrict mp, void *p_config) {
 extern EXT_C void print_output (Memory_st *restrict mp) {
   flush_cache(mp->y, sizeof(mp->y));
   for (int i=0; i<O_WORDS; i++){
-    int val_1000 = (int)(1000 * mp->y[i]);
-    printf("y[%d]: %d/1000 \n", i, val_1000);
+    printf("y[%d]: %f \n", i, (float)mp->y[i]);
   }
 }
